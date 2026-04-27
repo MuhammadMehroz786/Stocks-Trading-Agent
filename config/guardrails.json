@@ -1,0 +1,15 @@
+{
+  "maxOrderValueUsd": 5000,
+  "maxOrderPctOfPortfolio": 0.05,
+  "maxPositionPctOfPortfolio": 0.15,
+  "dailyLossCircuitBreakerPct": -0.03,
+  "dailyTradeCountLimit": 30,
+  "minSharePriceUsd": 5,
+  "shortSellingEnabled": false,
+  "tickerAllowlist": [],
+  "tickerDenylist": [
+    "TQQQ", "SQQQ", "UVXY", "SVXY", "VXX", "UVIX", "SVIX",
+    "SPXL", "SPXS", "TNA", "TZA", "FAS", "FAZ", "TMF", "TMV",
+    "SOXL", "SOXS", "LABU", "LABD", "NAIL", "DRN", "DRV"
+  ]
+}
