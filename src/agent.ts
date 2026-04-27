@@ -346,28 +346,38 @@ const portfolioSchema = z.object({
 // Note: testAlpacaConnection function has been replaced by validateAlpacaCredentials above
 
 // Helper function to get Alpaca account information
+// Legacy helper kept for backwards compatibility. Delegates to the broker
+// abstraction and reshapes the result to match the old Alpaca account shape.
 const getAlpacaAccount = async () => {
   try {
-    const account = await alpaca.getAccount();
-    log(`📊 Alpaca account status: ${account.status}, buying power: $${account.buying_power}`);
-    return account;
+    const acct = await broker.getAccount();
+    log(`📊 ${broker.name} account: cash $${acct.cash.toFixed(2)}, buying power $${acct.buyingPower.toFixed(2)}`);
+    return {
+      status: "ACTIVE",
+      cash: String(acct.cash),
+      buying_power: String(acct.buyingPower),
+      portfolio_value: String(acct.portfolioValue),
+      id: broker.name,
+    } as any;
   } catch (error: any) {
-    log(`❌ Failed to get Alpaca account: ${error.message || error}`);
-    if (error.response?.status === 404) {
-      log(`💡 Check Alpaca base URL: ${alpaca.configuration.baseUrl}`);
-    }
+    log(`❌ Failed to get account from ${broker.name}: ${error.message || error}`);
     throw error;
   }
 };
 
-// Helper function to get Alpaca positions
+// Legacy helper. Delegates to broker, reshapes to old Alpaca position shape.
 const getAlpacaPositions = async () => {
   try {
-    const positions = await alpaca.getPositions();
-    log(`📈 Retrieved ${positions.length} positions from Alpaca`);
-    return positions;
+    const ps = await broker.getPositions();
+    log(`📈 Retrieved ${ps.length} positions from ${broker.name}`);
+    return ps.map((p) => ({
+      symbol: p.ticker,
+      qty: String(p.shares),
+      market_value: String(p.marketValue),
+      unrealized_pl: String(p.unrealizedPl),
+    })) as any;
   } catch (error) {
-    log(`❌ Failed to get Alpaca positions: ${error}`);
+    log(`❌ Failed to get positions from ${broker.name}: ${error}`);
     throw error;
   }
 };
@@ -380,22 +390,22 @@ const getAlpacaPositions = async () => {
 //   return null;
 // };
 
-// Helper function to get recent orders as trading history
+// Legacy helper. Delegates to broker, reshapes to old Alpaca order shape.
 const getAlpacaOrderHistory = async (limit = 50) => {
   try {
-    const orders = await alpaca.getOrders({
-      status: 'all',
-      until: null,
-      after: null,
-      limit: limit,
-      direction: 'desc',
-      nested: true,
-      symbols: null
-    });
-    log(`📋 Retrieved ${orders.length} orders from Alpaca`);
-    return orders;
+    const orders = await broker.getOrders(limit);
+    log(`📋 Retrieved ${orders.length} orders from ${broker.name}`);
+    return orders.map((o) => ({
+      id: o.id,
+      symbol: o.ticker,
+      side: o.side,
+      filled_qty: o.shares != null ? String(o.shares) : "0",
+      filled_avg_price: o.filledAvgPrice != null ? String(o.filledAvgPrice) : "0",
+      filled_at: o.filledAt,
+      status: o.status,
+    })) as any;
   } catch (error) {
-    log(`❌ Failed to get Alpaca order history: ${error}`);
+    log(`❌ Failed to get orders from ${broker.name}: ${error}`);
     throw error;
   }
 };
@@ -457,12 +467,9 @@ const webSearch = async (query: string): Promise<string> => {
 
 const getStockPrice = async (ticker: string): Promise<number> => {
   try {
-    const quote = await alpaca.getLatestQuote(ticker);
-    invariant(quote && quote.BidPrice && quote.AskPrice, `Failed to get Alpaca market data for ${ticker}`);
-    
-    const midPrice = (quote.BidPrice + quote.AskPrice) / 2;
-    log(`✅ Found price for ${ticker}: $${midPrice.toFixed(2)} via Alpaca market data`);
-    return Math.round(midPrice * 100) / 100;
+    const px = await broker.getPrice(ticker);
+    log(`✅ Found price for ${ticker}: $${px.toFixed(2)} via ${broker.name}`);
+    return Math.round(px * 100) / 100;
   } catch (error) {
     log(`❌ Failed to get stock price for ${ticker}: ${error}`);
     throw error;
