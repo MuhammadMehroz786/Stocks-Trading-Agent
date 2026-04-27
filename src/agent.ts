@@ -17,6 +17,7 @@ import {
   isKillSwitchActive,
 } from "./guardrails/index.js";
 import type { Side } from "./guardrails/index.js";
+import { selectBroker } from "./brokers/index.js";
 
 // Parse model first to help determine profile name
 const modelName = process.env.MODEL || "gpt-4o";
@@ -74,14 +75,32 @@ console.log(`📁 Using profile: ${profileName} (model: ${modelName})`);
 
 // Validate required environment variables first
 invariant(process.env.OPENAI_API_KEY, "OPENAI_API_KEY is not set");
-invariant(process.env.ALPACA_API_KEY, "ALPACA_API_KEY is not set");
-invariant(process.env.ALPACA_SECRET_KEY, "ALPACA_SECRET_KEY is not set");
 
-// Hard safety check: refuse to start unless pointed at the paper trading endpoint.
-const ALPACA_BASE_URL = process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets";
-if (!ALPACA_BASE_URL.includes("paper-api.alpaca.markets")) {
-  console.error(`🛑 REFUSING TO START: ALPACA_BASE_URL is "${ALPACA_BASE_URL}". This build only supports paper trading.`);
-  console.error(`    Set ALPACA_BASE_URL=https://paper-api.alpaca.markets in your .env file.`);
+// Broker selection — defaults to alpaca for backwards compatibility.
+const SELECTED_BROKER = (process.env.BROKER || "alpaca").toLowerCase();
+
+if (SELECTED_BROKER === "alpaca") {
+  invariant(process.env.ALPACA_API_KEY, "ALPACA_API_KEY is not set");
+  invariant(process.env.ALPACA_SECRET_KEY, "ALPACA_SECRET_KEY is not set");
+
+  // Hard safety check: refuse to start unless pointed at the paper trading endpoint.
+  const ALPACA_BASE_URL = process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets";
+  if (!ALPACA_BASE_URL.includes("paper-api.alpaca.markets")) {
+    console.error(`🛑 REFUSING TO START: ALPACA_BASE_URL is "${ALPACA_BASE_URL}". This build only supports paper trading.`);
+    console.error(`    Set ALPACA_BASE_URL=https://paper-api.alpaca.markets in your .env file.`);
+    process.exit(1);
+  }
+} else if (SELECTED_BROKER === "paperinvest") {
+  invariant(process.env.PAPERINVEST_API_KEY, "PAPERINVEST_API_KEY is not set");
+  invariant(process.env.PAPERINVEST_PORTFOLIO_ID, "PAPERINVEST_PORTFOLIO_ID is not set");
+  invariant(process.env.PAPERINVEST_ACCOUNT_ID, "PAPERINVEST_ACCOUNT_ID is not set");
+  // Provide stubbed Alpaca creds so the legacy Alpaca client doesn't crash on init.
+  // The paperinvest broker handles every order; the Alpaca client is only kept around
+  // for legacy code paths that haven't been migrated yet (price fallback, etc.).
+  process.env.ALPACA_API_KEY = process.env.ALPACA_API_KEY || "stub-not-used";
+  process.env.ALPACA_SECRET_KEY = process.env.ALPACA_SECRET_KEY || "stub-not-used";
+} else {
+  console.error(`🛑 Unknown BROKER=${SELECTED_BROKER}. Supported: alpaca, paperinvest.`);
   process.exit(1);
 }
 
@@ -94,6 +113,10 @@ if (isKillSwitchActive()) {
 // Load guardrail config once at startup (reloaded each cycle inside the loop in continuous mode).
 let guardrailConfig = loadGuardrailConfig();
 console.log(`🛡️  Guardrails loaded: max order $${guardrailConfig.maxOrderValueUsd}, daily loss limit ${(guardrailConfig.dailyLossCircuitBreakerPct * 100).toFixed(1)}%, ${guardrailConfig.tickerDenylist.length} denylisted tickers.`);
+
+// Select broker once. All order placement goes through this.
+const broker = selectBroker();
+console.log(`🏦 Broker: ${broker.name}`);
 
 // Cache configuration
 const CACHE_TTL_SECONDS = parseInt(process.env.CACHE_TTL_SECONDS || "3600"); // 1 hour default
@@ -191,35 +214,33 @@ const validateAlpacaCredentials = async (): Promise<boolean> => {
 };
 
 // Comprehensive credential validation function
+const validatePaperinvestCredentials = async (): Promise<boolean> => {
+  try {
+    log("🔑 Validating Paperinvest API credentials...");
+    const acct = await broker.getAccount();
+    log(`✅ Paperinvest credentials validated — cash $${acct.cash.toFixed(2)}, buying power $${acct.buyingPower.toFixed(2)}`);
+    return true;
+  } catch (err: any) {
+    log(`❌ Paperinvest credentials validation failed: ${err?.message || err}`);
+    return false;
+  }
+};
+
 const validateAllCredentials = async (): Promise<void> => {
   log("🔐 Validating API credentials before starting trading session...");
-  
-  const validationResults = await Promise.allSettled([
-    validateOpenAICredentials(),
-    modelName.includes('gemini') ? validateGeminiCredentials() : Promise.resolve(true),
-    validateAlpacaCredentials()
-  ]);
-  
-  const [openaiResult, geminiResult, alpacaResult] = validationResults;
-  
+
+  const checks: Promise<boolean>[] = [validateOpenAICredentials()];
+  if (modelName.includes('gemini')) checks.push(validateGeminiCredentials());
+  if (SELECTED_BROKER === 'alpaca') {
+    checks.push(validateAlpacaCredentials());
+  } else if (SELECTED_BROKER === 'paperinvest') {
+    checks.push(validatePaperinvestCredentials());
+  }
+
+  const validationResults = await Promise.allSettled(checks);
   let hasErrors = false;
-  
-  // Check OpenAI validation
-  if (openaiResult.status === 'rejected' || openaiResult.value === false) {
-    log("❌ OpenAI credential validation failed");
-    hasErrors = true;
-  }
-  
-  // Check Gemini validation (only for Gemini models)
-  if (modelName.includes('gemini') && (geminiResult.status === 'rejected' || geminiResult.value === false)) {
-    log("❌ Gemini credential validation failed");
-    hasErrors = true;
-  }
-  
-  // Check Alpaca validation
-  if (alpacaResult.status === 'rejected' || alpacaResult.value === false) {
-    log("❌ Alpaca credential validation failed");
-    hasErrors = true;
+  for (const r of validationResults) {
+    if (r.status === 'rejected' || r.value === false) hasErrors = true;
   }
   
   if (hasErrors) {
@@ -495,7 +516,7 @@ const getPortfolio = async (): Promise<z.infer<typeof portfolioSchema>> => {
 };
 
 // Guardrail-enforced order placer. Validates against config + state before
-// touching the Alpaca API. Returns a string suitable for return to the LLM.
+// the order hits the broker. Returns a string suitable for return to the LLM.
 async function placeGuardedOrder(
   ticker: string,
   shares: number,
@@ -508,19 +529,17 @@ async function placeGuardedOrder(
   // Reload config each call so changes take effect without a restart.
   guardrailConfig = loadGuardrailConfig();
 
-  const account = await getAlpacaAccount();
-  const positions = await getAlpacaPositions();
-  const portfolioValue = parseFloat(account.portfolio_value);
-  const buyingPower = parseFloat(account.buying_power);
-  const currentPrice = await getStockPrice(ticker);
-  const position = positions.find((p: any) => p.symbol === ticker);
-  const currentSharesOfTicker = position ? parseFloat(position.qty) : 0;
+  const account = await broker.getAccount();
+  const positions = await broker.getPositions();
+  const currentPrice = await broker.getPrice(ticker);
+  const position = positions.find((p) => p.ticker === ticker.toUpperCase());
+  const currentSharesOfTicker = position ? position.shares : 0;
 
   // Refresh day state and check circuit breaker.
-  let state = recomputeIfNewDay(portfolioValue);
+  let state = recomputeIfNewDay(account.portfolioValue);
   if (shouldTripCircuitBreaker(state, guardrailConfig) && !state.circuitBreakerTripped) {
     state = markCircuitBreakerTripped();
-    log(`🛑 Daily loss circuit breaker tripped at portfolio value $${portfolioValue.toFixed(2)} (start of day $${state.startOfDayValue.toFixed(2)}).`);
+    log(`🛑 Daily loss circuit breaker tripped at portfolio value $${account.portfolioValue.toFixed(2)} (start of day $${state.startOfDayValue.toFixed(2)}).`);
   }
 
   const result = validateOrder(
@@ -529,8 +548,8 @@ async function placeGuardedOrder(
       shares,
       side,
       currentPrice,
-      portfolioValue,
-      buyingPower,
+      portfolioValue: account.portfolioValue,
+      buyingPower: account.buyingPower,
       currentSharesOfTicker,
     },
     guardrailConfig,
@@ -542,16 +561,8 @@ async function placeGuardedOrder(
     return `Order rejected by guardrails: ${result.reason}`;
   }
 
-  // Place the order.
-  const apiSide = side === "cover_short" ? "buy" : side === "short_sell" ? "sell" : side;
   try {
-    const order = await alpaca.createOrder({
-      symbol: ticker,
-      qty: shares,
-      side: apiSide,
-      type: "market",
-      time_in_force: "gtc",
-    });
+    const order = await broker.placeOrder({ ticker, shares, side });
     incrementTradeCount();
     const verb =
       side === "buy"
@@ -561,11 +572,11 @@ async function placeGuardedOrder(
         : side === "short_sell"
         ? "📉 Short sell"
         : "📈 Cover short";
-    log(`${verb} ${shares} ${ticker} @ ~$${currentPrice.toFixed(2)} (Order ID: ${order.id})`);
+    log(`${verb} ${shares} ${ticker} @ ~$${currentPrice.toFixed(2)} via ${broker.name} (Order ID: ${order.id})`);
     const orderValue = shares * currentPrice;
-    return `Submitted ${side} order: ${shares} shares of ${ticker} at market. Order ID: ${order.id}. Status: ${order.status}. Estimated value: $${orderValue.toFixed(2)}.`;
+    return `Submitted ${side} order: ${shares} shares of ${ticker} at market via ${broker.name}. Order ID: ${order.id}. Status: ${order.status}. Estimated value: $${orderValue.toFixed(2)}.`;
   } catch (error) {
-    log(`❌ Alpaca rejected ${side} ${shares} ${ticker}: ${error}`);
+    log(`❌ ${broker.name} rejected ${side} ${shares} ${ticker}: ${error}`);
     return `Failed to place ${side} order for ${shares} shares of ${ticker}. Error: ${error}`;
   }
 }
@@ -2288,8 +2299,8 @@ const runTradingSession = async (): Promise<void> => {
 
   // Refresh state and check circuit breaker before letting the LLM near tools.
   try {
-    const account = await getAlpacaAccount();
-    const portfolioValue = parseFloat(account.portfolio_value);
+    const account = await broker.getAccount();
+    const portfolioValue = account.portfolioValue;
     let state = recomputeIfNewDay(portfolioValue);
     guardrailConfig = loadGuardrailConfig();
     if (shouldTripCircuitBreaker(state, guardrailConfig)) {

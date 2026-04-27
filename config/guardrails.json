@@ -1,9 +1,9 @@
 {
-  "maxOrderValueUsd": 5000,
-  "maxOrderPctOfPortfolio": 0.05,
+  "maxOrderValueUsd": 1500,
+  "maxOrderPctOfPortfolio": 0.06,
   "maxPositionPctOfPortfolio": 0.15,
   "dailyLossCircuitBreakerPct": -0.03,
-  "dailyTradeCountLimit": 30,
+  "dailyTradeCountLimit": 5,
   "minSharePriceUsd": 5,
   "shortSellingEnabled": false,
   "tickerAllowlist": [],
