@@ -118,7 +118,7 @@ export class PaperinvestBroker implements Broker {
   }
 
   async placeOrder(args: PlaceOrderArgs): Promise<PlaceOrderResult> {
-    const intent =
+    const side =
       args.side === "buy"
         ? "BUY_TO_OPEN"
         : args.side === "sell"
@@ -128,13 +128,14 @@ export class PaperinvestBroker implements Broker {
         : "BUY_TO_CLOSE";
 
     const body = {
+      accountId: this.accountId,
       portfolioId: this.portfolioId,
+      assetClass: "EQUITY",
       symbol: args.ticker.toUpperCase(),
       quantity: args.shares,
-      orderType: "MARKET",
-      positionIntent: intent,
+      type: "MARKET",
+      side,
       timeInForce: "DAY",
-      assetClass: "EQUITY",
     };
 
     const o = await this.req<any>(`/orders`, {
